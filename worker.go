@@ -41,6 +41,10 @@ type Worker struct {
 	newRouterListeners       []func(context.Context, *Router)
 	closed                   bool
 	err                      error
+	// waitDone is closed by wait() once cmd.Wait() has returned. It is the
+	// race-free way to check for process exit: cmd.ProcessState must not be
+	// read while cmd.Wait() may be running concurrently.
+	waitDone chan struct{}
 }
 
 // NewWorker create a Worker.
@@ -201,10 +205,11 @@ func NewWorker(workerBinaryPath string, options ...Option) (*Worker, error) {
 	channel.Start()
 
 	w := &Worker{
-		cmd:     cmd,
-		channel: channel,
-		logger:  logger,
-		appData: opts.AppData,
+		cmd:      cmd,
+		channel:  channel,
+		logger:   logger,
+		appData:  opts.AppData,
+		waitDone: make(chan struct{}),
 	}
 
 	go w.wait(cmd, &spawnDone, doneCh)
@@ -226,6 +231,7 @@ func NewWorker(workerBinaryPath string, options ...Option) (*Worker, error) {
 
 func (w *Worker) wait(cmd *exec.Cmd, spawnDone *uint32, doneCh chan error) {
 	err := cmd.Wait()
+	close(w.waitDone)
 	if err != nil {
 		code := cmd.ProcessState.ExitCode()
 		err = fmt.Errorf("worker process failed unexpectedly, code: %d, %w", code, err)
@@ -276,21 +282,16 @@ func (w *Worker) CloseContext(ctx context.Context) {
 	}
 	w.logger.DebugContext(ctx, "Close()")
 
-	if w.cmd.ProcessState == nil {
+	select {
+	case <-w.waitDone:
+		// Worker process already exited.
+	default:
 		go func() {
-			now := time.Now()
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-
-			for range ticker.C {
-				if w.cmd.ProcessState != nil {
-					return
-				}
-				if time.Since(now) > time.Second {
-					w.logger.WarnContext(ctx, "force kill worker process")
-					w.cmd.Process.Kill()
-					return
-				}
+			select {
+			case <-w.waitDone:
+			case <-time.After(time.Second):
+				w.logger.WarnContext(ctx, "force kill worker process")
+				w.cmd.Process.Kill()
 			}
 		}()
 
