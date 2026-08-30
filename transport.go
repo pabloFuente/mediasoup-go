@@ -475,7 +475,9 @@ func (t *Transport) ConnectContext(ctx context.Context, connectOpts *TransportCo
 		}
 		result := resp.(*FbsWebRtcTransport.ConnectResponseT)
 		// Update data.
+		t.mu.Lock()
 		t.data.DtlsParameters.Role = DtlsRole(strings.ToLower(result.DtlsLocalRole.String()))
+		t.mu.Unlock()
 
 	case TransportPlain:
 		resp, err := t.channel.Request(ctx, &FbsRequest.RequestT{
@@ -496,12 +498,14 @@ func (t *Transport) ConnectContext(ctx context.Context, connectOpts *TransportCo
 		}
 		result := resp.(*FbsPlainTransport.ConnectResponseT)
 		// Update data.
+		t.mu.Lock()
 		data := t.data.PlainTransportData
 		if tuple := parseTransportTuple(result.Tuple); tuple != nil {
 			data.Tuple = *tuple
 		}
 		data.RtcpTuple = parseTransportTuple(result.RtcpTuple)
 		data.SrtpParameters = parseSrtpParameters(result.SrtpParameters)
+		t.mu.Unlock()
 
 	case TransportPipe:
 		resp, err := t.channel.Request(ctx, &FbsRequest.RequestT{
@@ -521,7 +525,9 @@ func (t *Transport) ConnectContext(ctx context.Context, connectOpts *TransportCo
 		}
 		result := resp.(*FbsPipeTransport.ConnectResponseT)
 		// Update data.
+		t.mu.Lock()
 		t.data.PipeTransportData.Tuple = *parseTransportTuple(result.Tuple)
+		t.mu.Unlock()
 	}
 
 	return nil
@@ -553,7 +559,9 @@ func (t *Transport) RestartIceContext(ctx context.Context) (*IceParameters, erro
 	}
 
 	// Update data.
+	t.mu.Lock()
 	t.data.IceParameters = iceParameters
+	t.mu.Unlock()
 
 	return &iceParameters, nil
 }

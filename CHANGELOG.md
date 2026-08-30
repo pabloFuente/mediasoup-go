@@ -29,6 +29,8 @@ Sync with mediasoup v3.20.0~v3.26.0 changelog. Requires mediasoup-worker **v3.26
 - fix(ortc): don't reuse the given `RtpCapabilities` storage when filtering RTCP feedback, which
   corrupted them when consuming from several goroutines
 - fix(router): data race on the error of the two pipe transports created by `PipeToRouter()`
+- fix(worker): don't read `cmd.ProcessState` while `Wait()` is running; wait on a `waitDone` channel instead ([#83](https://github.com/jiyeyuran/mediasoup-go/pull/83))
+- fix(transport): lock `t.mu` when `Connect` / `RestartIce` update transport data ([#83](https://github.com/jiyeyuran/mediasoup-go/pull/83))
 
 ### 2.4.1
 
