@@ -24,7 +24,7 @@ Note: Make sure to download the prebuilt mediasoup worker that matches the versi
 - Full mediasoup v3 API support in Go
 - Consistent API design with the original Node.js version
 - Typed event listeners instead of string event names, each removable again
-- Multi-core via `WorkerPool`, with `PipeTransport` to bridge routers across workers
+- Multi-core via `WorkerPool`, with pluggable scheduling and `PipeTransport` to bridge routers across workers
 - Worker channel request latency and pending-request count exposed for metrics
 - Uses `Cmd.ExtraFiles` for worker communication (not compatible with Windows)
 
@@ -51,7 +51,7 @@ import "github.com/jiyeyuran/mediasoup-go/v2"
 See [mediasoup-go-demo](https://github.com/jiyeyuran/mediasoup-go-demo) for a complete example application.
 
 <details>
-<summary>Click to see code example</summary>
+<summary>Single worker</summary>
 
 ```go
 package main
@@ -82,6 +82,76 @@ func main() {
 
     // Use the transport to produce/consume media
     // ...
+}
+```
+
+</details>
+
+<details>
+<summary>WorkerPool (multi-core)</summary>
+
+A worker is pinned to one CPU core. `WorkerPool` starts one worker per core (or
+as many as you ask for) and puts each new router on the next live worker.
+
+Routers on different workers cannot forward media to each other. Put peers that
+talk to each other on the same router; use `Router.PipeToRouter` when they cannot
+share one. You do not have to know which worker each router is on: `PipeToRouter`
+keeps the producer id across workers and generates a new one when they share one.
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/jiyeyuran/mediasoup-go/v2"
+)
+
+func main() {
+    // 0 means runtime.NumCPU(). WebRtcServer is created with each worker;
+    // without UDPReusePort the port is incremented per worker (44444, 44445, …).
+    pool, err := mediasoup.NewWorkerPool("/path/to/mediasoup-worker", 0, func(s *mediasoup.WorkerSettings) {
+        s.WebRtcListenInfos = []*mediasoup.TransportListenInfo{
+            {
+                Protocol:         mediasoup.TransportProtocolUDP,
+                Ip:               "0.0.0.0",
+                AnnouncedAddress: "your.public.ip",
+                Port:             44444,
+            },
+        }
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer pool.Close()
+
+    // A worker that dies (C++ abort) is replaced with an empty one so later
+    // rooms can still use that core. The rooms it hosted are gone.
+    pool.OnWorkerDied(func(ctx context.Context, worker *mediasoup.Worker, err error) {
+        log.Printf("worker %d died: %v; tell its clients to renegotiate", worker.Pid(), err)
+    })
+
+    // Default is round-robin. LeastLoaded(nil) picks the worker carrying the
+    // fewest producers and consumers; pass your own function to weigh rooms
+    // by something the application already tracks.
+    pool.SetScheduler(mediasoup.LeastLoaded(nil))
+
+    router, err := pool.CreateRouter(&mediasoup.RouterOptions{
+        // Configure media codecs
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // ListenInfos and WebRtcServer can both be omitted: the worker's default
+    // WebRtcServer is used.
+    transport, err := router.CreateWebRtcTransport(&mediasoup.WebRtcTransportOptions{})
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    _ = transport
 }
 ```
 

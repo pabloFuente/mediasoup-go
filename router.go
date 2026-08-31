@@ -39,6 +39,7 @@ type routerData struct {
 type Router struct {
 	baseListener
 
+	worker  *Worker
 	channel *channel.Channel
 	data    *routerData
 	closed  bool
@@ -51,6 +52,10 @@ type Router struct {
 	dataProducers sync.Map
 	dataConsumers sync.Map
 
+	// Counted alongside the maps above, which have no length of their own, so that
+	// LeastLoaded can weigh a worker without walking every map.
+	counts objectCounters
+
 	newRtpObserverListeners listenerList[func(context.Context, *RtpObserver)]
 	newTransportListeners   listenerList[func(context.Context, *Transport)]
 	workerCloseListeners    listenerList[func(context.Context)]
@@ -59,9 +64,10 @@ type Router struct {
 	mapRouterPipeTransports map[*Router][2]*Transport
 }
 
-func newRouter(channel *channel.Channel, logger *slog.Logger, data *routerData) *Router {
+func newRouter(worker *Worker, logger *slog.Logger, data *routerData) *Router {
 	return &Router{
-		channel:                 channel,
+		worker:                  worker,
+		channel:                 worker.channel,
 		data:                    data,
 		logger:                  logger.With("routerId", data.RouterId),
 		mapRouterPipeTransports: make(map[*Router][2]*Transport),
@@ -72,6 +78,11 @@ func (r *Router) Id() string {
 	return r.data.RouterId
 }
 
+// Worker returns the worker this router was created on.
+func (r *Router) Worker() *Worker {
+	return r.worker
+}
+
 func (r *Router) RtpCapabilities() *RtpCapabilities {
 	return r.data.RtpCapabilities
 }
@@ -79,6 +90,10 @@ func (r *Router) RtpCapabilities() *RtpCapabilities {
 // AppData returns app custom data.
 func (r *Router) AppData() H {
 	return r.data.AppData
+}
+
+func (r *Router) objectCounts() objectCounts {
+	return r.counts.load()
 }
 
 func (r *Router) GetTransportById(id string) *Transport {
@@ -398,6 +413,11 @@ func (r *Router) CreateWebRtcTransportContext(ctx context.Context, options *WebR
 		SctpOptions:                     options.withDefaults(),
 		AppData:                         orElse(options.AppData != nil, options.AppData, H{}),
 	}
+	if o.WebRtcServer == nil && len(o.ListenInfos) == 0 {
+		if server := r.worker.WebRtcServer(); server != nil && !server.Closed() {
+			o.WebRtcServer = server
+		}
+	}
 	if len(o.ListenInfos) == 0 && o.WebRtcServer == nil {
 		return nil, errors.New("missing webRtcServerId and listenInfos (one of them is mandatory)")
 	}
@@ -708,7 +728,9 @@ func (r *Router) CreateDirectTransportContext(ctx context.Context, options *Dire
 	return r.newTransport(ctx, data)
 }
 
-// PipeToRouter pipes the given Producer or DataProducer into another Router in same host.
+// PipeToRouter pipes the given Producer or DataProducer into another Router on
+// the same host. The two routers may share a worker: if KeepId is left unset,
+// a new producer id is generated in that case instead of failing.
 func (r *Router) PipeToRouter(options *PipeToRouterOptions) (result *PipeToRouterResult, err error) {
 	return r.PipeToRouterContext(context.Background(), options)
 }
@@ -751,6 +773,15 @@ func (r *Router) PipeToRouterContext(ctx context.Context, options *PipeToRouterO
 	}
 	if o.Router == r {
 		return nil, errors.New("cannot use this Router as destination'")
+	}
+
+	// KeepId defaults to true so Consume() on the far side can use the original
+	// producer id. That id is unique per worker, so two routers on the same
+	// worker cannot keep it. When the caller did not say, drop the id rather
+	// than fail: a WorkerPool spreads rooms without telling the application
+	// which worker each router landed on.
+	if options.KeepId == nil && r.channel == o.Router.channel {
+		o.KeepId = ref(false)
 	}
 
 	var producer *Producer
@@ -1077,29 +1108,47 @@ func (r *Router) newTransport(ctx context.Context, data *internalTransportData) 
 	data.GetProducerId = r.GetProducerById
 	data.GetDataProducerId = r.GetDataProducerById
 	data.GetRouterRtpCapabilities = r.RtpCapabilities
+	// Swap and LoadAndDelete rather than Store and Delete: the counters have to
+	// follow what the map actually did, not what the caller asked for.
 	data.OnAddProducer = func(p *Producer) {
-		r.producers.Store(p.Id(), p)
+		if _, loaded := r.producers.Swap(p.Id(), p); !loaded {
+			r.counts.producers.Add(1)
+		}
 	}
 	data.OnAddConsumer = func(c *Consumer) {
-		r.consumers.Store(c.Id(), c)
+		if _, loaded := r.consumers.Swap(c.Id(), c); !loaded {
+			r.counts.consumers.Add(1)
+		}
 	}
 	data.OnAddDataProducer = func(p *DataProducer) {
-		r.dataProducers.Store(p.Id(), p)
+		if _, loaded := r.dataProducers.Swap(p.Id(), p); !loaded {
+			r.counts.dataProducers.Add(1)
+		}
 	}
 	data.OnAddDataConsumer = func(c *DataConsumer) {
-		r.dataConsumers.Store(c.Id(), c)
+		if _, loaded := r.dataConsumers.Swap(c.Id(), c); !loaded {
+			r.counts.dataConsumers.Add(1)
+		}
 	}
 	data.OnRemoveProducer = func(p *Producer) {
-		r.producers.Delete(p.Id())
+		if _, loaded := r.producers.LoadAndDelete(p.Id()); loaded {
+			r.counts.producers.Add(-1)
+		}
 	}
 	data.OnRemoveConsumer = func(c *Consumer) {
-		r.consumers.Delete(c.Id())
+		if _, loaded := r.consumers.LoadAndDelete(c.Id()); loaded {
+			r.counts.consumers.Add(-1)
+		}
 	}
 	data.OnRemoveDataProducer = func(p *DataProducer) {
-		r.dataProducers.Delete(p.Id())
+		if _, loaded := r.dataProducers.LoadAndDelete(p.Id()); loaded {
+			r.counts.dataProducers.Add(-1)
+		}
 	}
 	data.OnRemoveDataConsumer = func(c *DataConsumer) {
-		r.dataConsumers.Delete(c.Id())
+		if _, loaded := r.dataConsumers.LoadAndDelete(c.Id()); loaded {
+			r.counts.dataConsumers.Add(-1)
+		}
 	}
 
 	transport := newTransport(r.channel, r.logger, data)

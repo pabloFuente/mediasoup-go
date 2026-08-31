@@ -1,5 +1,31 @@
 # Changelog
 
+### 2.6.1
+
+- `WorkerPool`: add the `Scheduler` interface and `SetScheduler()`, so which worker a
+  router lands on is the application's decision. Round-robin stays the default and
+  spreads rooms evenly, but it treats every room as equally expensive: `LeastLoaded`
+  weighs the workers by a load function of your own, `Random` carries no shared
+  state, and `SchedulerFunc` covers any other strategy. A scheduler only ever sees
+  live workers, and is called without the pool lock held so it may consult them.
+  `LeastLoaded` given no load function of its own weighs producers and consumers,
+  which is what a worker's capacity is measured in. `GetResourceUsage()` is a
+  round trip to the subprocess and does not belong on the path of every router
+  creation
+- `Router.PipeToRouter()`: when `KeepId` is left unset, two routers on the same
+  worker now get a new producer id instead of failing. A `WorkerPool` does not
+  tell the application which worker a router landed on, so the call no longer
+  has to know
+- `WorkerSettings.WebRtcListenInfos`: if set, a WebRtcServer is created with
+  the worker. `Worker.WebRtcServer()` returns it. `CreateWebRtcTransport` with
+  neither `ListenInfos` nor `WebRtcServer` uses that default. A `WorkerPool`
+  increments a fixed listen port per worker unless `UDPReusePort` is set, and
+  recreates the server on a replacement worker. `Router.Worker()` says
+  which worker a router sits on
+- `WorkerPool`: a worker that dies is replaced with a new empty one so later
+  rooms can still use that core; `OnWorkerDied` / `OnWorkerReplaced` are how
+  the application hears about it. Rooms on the dead worker are gone.
+
 ### 2.6.0
 
 Close the remaining API gaps against the mediasoup Node.js binding, add the

@@ -150,6 +150,20 @@ func TestCreateWebRtcTransport(t *testing.T) {
 	require.Nil(t, transport)
 }
 
+func TestCreateWebRtcTransportUsesWorkerWebRtcServer(t *testing.T) {
+	worker := newTestWorker(func(s *WorkerSettings) {
+		s.WebRtcListenInfos = []*TransportListenInfo{
+			{Protocol: TransportProtocolUDP, Ip: "127.0.0.1"},
+		}
+	})
+	router, err := worker.CreateRouter(&RouterOptions{})
+	require.NoError(t, err)
+
+	transport, err := router.CreateWebRtcTransport(&WebRtcTransportOptions{})
+	require.NoError(t, err)
+	assert.False(t, transport.Closed())
+}
+
 func TestCreateWebRtcTransportWithPortRange(t *testing.T) {
 	worker := newTestWorker()
 	router, _ := worker.CreateRouter(&RouterOptions{})
@@ -872,6 +886,17 @@ func TestPipeToRouter(t *testing.T) {
 			},
 		}, pipeProducer.RtpParameters().HeaderExtensions)
 		assert.True(t, pipeProducer.Paused())
+	})
+
+	t.Run("pipeToRouter on the same Worker generates a new id when KeepId is unset", func(t *testing.T) {
+		router1bis := createRouter(worker1)
+		result, err := router1.PipeToRouter(&PipeToRouterOptions{
+			ProducerId: videoProducer.Id(),
+			Router:     router1bis,
+		})
+		require.NoError(t, err)
+		assert.NotEqual(t, videoProducer.Id(), result.PipeProducer.Id())
+		router1bis.Close()
 	})
 
 	t.Run("pipeToRouter with KeepID: true fails if both Routers belong to the same Worker", func(t *testing.T) {

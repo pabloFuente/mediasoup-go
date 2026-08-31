@@ -97,6 +97,20 @@ func TestWorkerUpdateSettings(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestWorkerSettingsWebRtcServer(t *testing.T) {
+	worker := newTestWorker(func(s *WorkerSettings) {
+		s.WebRtcListenInfos = []*TransportListenInfo{
+			{Protocol: TransportProtocolUDP, Ip: "127.0.0.1"},
+		}
+	})
+	defer worker.Close()
+
+	require.NotNil(t, worker.WebRtcServer())
+	dump, err := worker.Dump()
+	require.NoError(t, err)
+	assert.Contains(t, dump.WebRtcServerIds, worker.WebRtcServer().Id())
+}
+
 func TestWorkerCreateWebRtcServer(t *testing.T) {
 	mymock := new(MockedHandler)
 	defer mymock.AssertExpectations(t)
@@ -245,6 +259,45 @@ func TestWorkerClose(t *testing.T) {
 
 		assert.True(t, router.Closed())
 	})
+}
+
+func TestWorkerObjectCounts(t *testing.T) {
+	worker := newTestWorker()
+	defer worker.Close()
+
+	assert.Equal(t, objectCounts{}, worker.objectCounts())
+
+	router := createRouter(worker)
+	transport := createPlainTransport(router)
+	sctpTransport := createWebRtcTransport(router, func(o *WebRtcTransportOptions) {
+		o.EnableSctp = true
+	})
+
+	producer := createAudioProducer(transport)
+	consumer := createConsumer(transport, producer.Id())
+	dataProducer := createDataProducer(sctpTransport)
+	dataConsumer := createDataConsumer(sctpTransport, dataProducer.Id())
+
+	assert.Equal(t, objectCounts{
+		producers:     1,
+		consumers:     1,
+		dataProducers: 1,
+		dataConsumers: 1,
+	}, worker.objectCounts())
+	assert.Equal(t, router.objectCounts(), worker.objectCounts())
+	assert.Equal(t, 2, worker.objectCounts().rtpStreams())
+
+	consumer.Close()
+	assert.Equal(t, objectCounts{
+		producers:     1,
+		dataProducers: 1,
+		dataConsumers: 1,
+	}, worker.objectCounts())
+
+	producer.Close()
+	dataConsumer.Close()
+	dataProducer.Close()
+	assert.Equal(t, objectCounts{}, worker.objectCounts())
 }
 
 func TestWorkerChannelRequestObserver(t *testing.T) {

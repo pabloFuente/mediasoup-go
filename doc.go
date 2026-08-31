@@ -32,14 +32,35 @@ hands out a worker per room, round-robin, skipping any that have died:
 
 	router, err := pool.CreateRouter(&mediasoup.RouterOptions{MediaCodecs: codecs})
 
+Round-robin spreads rooms evenly but treats them all as equally expensive. When
+they are not, WorkerPool.SetScheduler takes a Scheduler that decides which worker
+a new router goes on: Random, LeastLoaded weighing the workers by a load function
+of your own, or any strategy of your own through SchedulerFunc.
+
+	pool.SetScheduler(mediasoup.LeastLoaded(func(worker *mediasoup.Worker) float64 {
+		return float64(consumerCount(worker))
+	}))
+
+A scheduler is consulted on every CreateRouter call, so it has to be cheap. Count
+what the application already tracks rather than asking the subprocess through
+Worker.GetResourceUsage. LeastLoaded with no load function of its own weighs the
+producers and consumers already on each worker.
+
 Routers on different workers cannot forward media to each other directly, so put
 endpoints that talk to each other on one router where possible, and bridge with
-Router.PipeToRouter where not.
+Router.PipeToRouter where not. PipeToRouter does not need to be told whether the
+two routers share a worker: it keeps the producer id across workers and generates
+a new one when they do not.
 
-The pool does not restart a worker that dies, because the routers, transports and
-producers on it are gone with the subprocess and only the application knows
-whether the affected clients should renegotiate elsewhere or be dropped. Register
-Worker.OnDied over WorkerPool.Workers to find out.
+Set WorkerSettings.WebRtcListenInfos to create a WebRtcServer with each worker.
+Worker.WebRtcServer() returns it. CreateWebRtcTransport with neither
+ListenInfos nor WebRtcServer uses that default. Router.Worker says which
+worker a router sits on. A fixed listen port without
+UDPReusePort is incremented per worker so the binds do not collide.
+
+A worker that dies is replaced with a new empty one so later CreateRouter calls
+can still use that core. The rooms it hosted are gone; OnWorkerDied is where
+those clients get told to renegotiate. Close does not replace.
 
 # Object graph
 
